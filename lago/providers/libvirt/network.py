@@ -21,6 +21,7 @@ from future.builtins import super
 from collections import defaultdict
 import functools
 import logging
+import os
 import time
 from copy import deepcopy
 
@@ -41,6 +42,22 @@ class Network(object):
         )
         self._spec = spec
         self.compat = compat
+
+        ip_type = os.getenv('LAGO_NETWORK', None)
+        if ip_type is None:
+            self.ipv4_network = True
+            self.ipv6_network = True
+        elif ip_type.lower() == 'ipv4':
+            self.ipv4_network = True
+            self.ipv6_network = False
+        elif ip_type.lower() == 'ipv6':
+            self.ipv4_network = False
+            self.ipv6_network = True
+        else:
+            raise RuntimeError(
+                'LAGO_NETWORK should be set to \
+                ipv4 or ipv6 or not set at all'
+            )
 
     def __del__(self):
         if self.libvirt_con is not None:
@@ -169,8 +186,10 @@ class NATNetwork(Network):
                 host.text = hostname
                 record_ipv4.append(host)
                 record_ipv6.append(deepcopy(host))
-            dns.append(record_ipv4)
-            dns.append(record_ipv6)
+            if self.ipv4_network:
+                dns.append(record_ipv4)
+            if self.ipv6_network:
+                dns.append(record_ipv6)
 
         return dns
 
@@ -202,31 +221,33 @@ class NATNetwork(Network):
                 size=str(mtu),
             ))
         if 'dhcp' in self._spec:
-            ipv4 = net_xml.xpath('/network/ip')[0]
-            ipv6 = net_xml.xpath('/network/ip')[1]
 
             def make_ipv4(last):
                 return '.'.join(self.gw().split('.')[:-1] + [str(last)])
 
-            dhcp = ET.Element('dhcp')
-            dhcpv6 = ET.Element('dhcp')
-            ipv4.append(dhcp)
-            ipv6.append(dhcpv6)
-
-            dhcp.append(
-                ET.Element(
-                    'range',
-                    start=make_ipv4(self._spec['dhcp']['start']),
-                    end=make_ipv4(self._spec['dhcp']['end']),
+            if self.ipv4_network:
+                ipv4 = net_xml.xpath('/network/ip')[0]
+                dhcp = ET.Element('dhcp')
+                ipv4.append(dhcp)
+                dhcp.append(
+                    ET.Element(
+                        'range',
+                        start=make_ipv4(self._spec['dhcp']['start']),
+                        end=make_ipv4(self._spec['dhcp']['end']),
+                    )
                 )
-            )
-            dhcpv6.append(
-                ET.Element(
-                    'range',
-                    start=ipv6_prefix + make_ipv4(self._spec['dhcp']['start']),
-                    end=ipv6_prefix + make_ipv4(self._spec['dhcp']['end']),
+            if self.ipv6_network:
+                ipv6 = net_xml.xpath('/network/ip')[1]
+                dhcpv6 = ET.Element('dhcp')
+                ipv6.append(dhcpv6)
+                dhcpv6.append(
+                    ET.Element(
+                        'range',
+                        start=ipv6_prefix +
+                        make_ipv4(self._spec['dhcp']['start']),
+                        end=ipv6_prefix + make_ipv4(self._spec['dhcp']['end']),
+                    )
                 )
-            )
 
             ipv4s = []
             for hostname in sorted(self._spec['mapping'].iterkeys()):
@@ -235,22 +256,24 @@ class NATNetwork(Network):
                     continue
 
                 ipv4s.append(ip4)
-                dhcp.append(
-                    ET.Element(
-                        'host',
-                        mac=utils.ipv4_to_mac(ip4),
-                        ip=ip4,
-                        name=hostname
+                if self.ipv4_network:
+                    dhcp.append(
+                        ET.Element(
+                            'host',
+                            mac=utils.ipv4_to_mac(ip4),
+                            ip=ip4,
+                            name=hostname
+                        )
                     )
-                )
-                dhcpv6.append(
-                    ET.Element(
-                        'host',
-                        id='0:3:0:1:' + utils.ipv4_to_mac(ip4),
-                        ip=ipv6_prefix + ip4,
-                        name=hostname
+                if self.ipv6_network:
+                    dhcpv6.append(
+                        ET.Element(
+                            'host',
+                            id='0:3:0:1:' + utils.ipv4_to_mac(ip4),
+                            ip=ipv6_prefix + ip4,
+                            name=hostname
+                        )
                     )
-                )
 
         if utils.ver_cmp(self.compat, '0.36.11') >= 0:
             if self.is_management():
